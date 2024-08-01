@@ -170,6 +170,15 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 
 		Note for all ASN.1 writes below that mbedtls works backwords when building
 		ASN.1 structures.
+
+		Structure:
+
+		PrivateKeyInfo ::= SEQUENCE {
+		  version ::= INTEGER,
+		  privateKeyAlgorithm ::= SEQUENCE {
+		    algorithm ::= OBJECT IDENTIFIER UNIQUE, # rsaEncryption
+		    parameters ::= NULL },
+		  privateKey ::= OCTET STRING }
 		*/
 		// privateKey field
 		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_len(&c, output_buf, len));
@@ -210,6 +219,25 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 
 			Then, we put the encrypted data into a valid PKCS#8 encrypted structure
 			(see RFC 5208 section 6).
+
+			Structure:
+
+			EncryptedPrivateKeyInfo ::= SEQUENCE {
+			  encrypionAlgorithm ::= SEQUENCE {
+			    algorithm ::= OBJECT IDENTIFIER UNIQUE, # PBES2
+				parameters ::= SEQUENCE {
+				  keyDerivationFunc ::= SEQUENCE {
+				    algorithm ::= OBJECT IDENTIFIER UNIQUE, # PBKDF2
+					parameters ::= SEQUENCE {
+					  salt ::= OCTET STRING,
+					  iterationCount ::= INTEGER,
+					  prf ::= SEQUENCE {
+					    algorithm ::= OBJECT IDENTIFIER UNIQUE, # hmacWithSHA256
+						parameters ::= NULL }}},
+			      encryptionScheme ::= SEQUENCE {
+				    algorithm ::= OBJECT IDENTIFIER UNIQUE, # aes256-cbc
+					parameters ::= OCTET STRING }}}, # AES-InitializationVector
+			  encryptedData ::= OCTET STRING } # Encrypted private key from above
 			*/
 			const char password[] = "morningstar";
 			const unsigned char salt[8] = { 0x35, 0x99, 0x62, 0x6B, 0x93, 0x1A, 0xDA, 0xE3 };
