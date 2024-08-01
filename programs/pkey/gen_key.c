@@ -29,6 +29,9 @@ int main(void)
 #include "mbedtls/error.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
+#include "mbedtls/oid.h"
+#include "mbedtls/asn1write.h"
+#include "mbedtls/pkcs5.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,9 +93,9 @@ int dev_random_entropy_poll(void *data, unsigned char *output,
 #define FORMAT_DER              1
 
 #define DFL_TYPE                MBEDTLS_PK_RSA
-#define DFL_RSA_KEYSIZE         4096
+#define DFL_RSA_KEYSIZE         2048
 #define DFL_FILENAME            "keyfile.key"
-#define DFL_FORMAT              FORMAT_PEM
+#define DFL_FORMAT              FORMAT_DER
 #define DFL_USE_DEV_RANDOM      0
 
 #define USAGE \
@@ -124,6 +127,8 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
     int ret;
     FILE *f;
     unsigned char output_buf[16000];
+	unsigned char encrypted_buffer[4096];
+	size_t encrypted_len;
     unsigned char *c = output_buf;
     size_t len = 0;
 
@@ -141,6 +146,108 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 
         len = ret;
         c = output_buf + sizeof(output_buf) - len;
+
+		// Convert to PKCS#8
+		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_len(&c, output_buf, len));
+		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_tag(&c, output_buf,
+			(MBEDTLS_ASN1_OCTET_STRING | MBEDTLS_ASN1_PRIMITIVE)));
+
+		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_algorithm_identifier(&c, output_buf,
+			MBEDTLS_OID_PKCS1_RSA, MBEDTLS_OID_SIZE(MBEDTLS_OID_PKCS1_RSA), 0));
+
+		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_int(&c, output_buf, 0));
+
+		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_len(&c, output_buf, len));
+		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_tag(&c, output_buf,
+			(MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED)));
+
+		if ((f = fopen("keyfile_2.key", "wb")) == NULL) {
+			return -1;
+		}
+
+		if (fwrite(c, 1, len, f) != len) {
+			fclose(f);
+			return -1;
+		}
+
+		fclose(f);
+
+		{
+			const char password[] = "morningstar";
+			const unsigned char salt[8] = { 0x35, 0x99, 0x62, 0x6B, 0x93, 0x1A, 0xDA, 0xE3 };
+			const unsigned char iv[16] = { 0x03, 0xAA, 0xD8, 0xA2, 0x51, 0xDC, 0xE3, 0x75, 0x34, 0x5A, 0xF7, 0x39, 0x26, 0x19, 0x0F, 0x17 };
+			mbedtls_asn1_buf pbe_params;
+			unsigned char pbuf[74];
+			unsigned char *p = pbuf + sizeof(pbuf);
+			int sequence_len, total_len;
+
+			total_len = sequence_len = 0;
+
+			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_octet_string(&p, pbuf,
+				iv, sizeof(iv)));
+
+			sequence_len = mbedtls_asn1_write_algorithm_identifier(&p,
+				pbuf, MBEDTLS_OID_AES_256_CBC,
+				MBEDTLS_OID_SIZE(MBEDTLS_OID_AES_256_CBC), sequence_len);
+
+			total_len += sequence_len;
+			sequence_len = 0;
+
+			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_algorithm_identifier(&p,
+				pbuf, MBEDTLS_OID_HMAC_SHA256,
+				MBEDTLS_OID_SIZE(MBEDTLS_OID_HMAC_SHA256), 0));
+
+			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_int(&p, pbuf, 2048));
+
+			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_octet_string(&p, pbuf,
+				salt, sizeof(salt)));
+
+			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_len(&p, pbuf, sequence_len));
+
+			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_tag(&p, pbuf,
+				MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED));
+
+			sequence_len = mbedtls_asn1_write_algorithm_identifier(&p,
+				pbuf, MBEDTLS_OID_PKCS5_PBKDF2,
+				MBEDTLS_OID_SIZE(MBEDTLS_OID_PKCS5_PBKDF2), sequence_len);
+
+			total_len += sequence_len;
+			pbe_params.p = p;
+			pbe_params.len = total_len;
+			pbe_params.tag = (MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED);
+
+			ret = mbedtls_pkcs5_pbes2_ext(&pbe_params, MBEDTLS_PKCS5_ENCRYPT,
+				(unsigned char*)password, strlen(password), c, len, encrypted_buffer,
+				sizeof(encrypted_buffer), &encrypted_len);
+
+			if (ret != 0) {
+				return ret;
+			}
+
+			p = output_buf + sizeof(output_buf);
+
+			mbedtls_asn1_write_octet_string(&p, output_buf, encrypted_buffer,
+				encrypted_len);
+
+			p -= pbe_params.len;
+			memcpy(p, pbe_params.p, pbe_params.len);
+
+			total_len = pbe_params.len;
+			MBEDTLS_ASN1_CHK_ADD(total_len, mbedtls_asn1_write_len(&p, output_buf, pbe_params.len));
+			MBEDTLS_ASN1_CHK_ADD(total_len, mbedtls_asn1_write_tag(&p, output_buf, (MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED)));
+
+			mbedtls_asn1_write_algorithm_identifier(&p, output_buf,
+				MBEDTLS_OID_PKCS5_PBES2, MBEDTLS_OID_SIZE(MBEDTLS_OID_PKCS5_PBES2),
+				total_len);
+
+			total_len = (output_buf + sizeof(output_buf)) - p;
+
+			MBEDTLS_ASN1_CHK_ADD(total_len, mbedtls_asn1_write_len(&p, output_buf, total_len));
+			MBEDTLS_ASN1_CHK_ADD(total_len, mbedtls_asn1_write_tag(&p, output_buf, (MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED)));
+
+			c = p;
+			len = ((output_buf + sizeof(output_buf)) - p);
+		}
     }
 
     if ((f = fopen(output_file, "wb")) == NULL) {
@@ -263,7 +370,7 @@ int main(int argc, char *argv[])
     }
 #endif /* MBEDTLS_USE_PSA_CRYPTO */
 
-    if (argc < 2) {
+    if (argc < 1) {
 usage:
         mbedtls_printf(USAGE);
 #if defined(MBEDTLS_ECP_C)
@@ -374,6 +481,41 @@ usage:
 
 #if defined(MBEDTLS_RSA_C) && defined(MBEDTLS_GENPRIME)
     if (opt.type == MBEDTLS_PK_RSA) {
+// Uncomment to instead load an existing key
+#if 0
+		unsigned char buffer[2048];
+		FILE *f;
+
+		mbedtls_pk_free(&key);
+		mbedtls_pk_init(&key);
+
+		if ((f = fopen("private_2048.key", "rb")) == NULL) {
+			mbedtls_printf(" failed\n ! Could not open private_2048.key");
+			goto exit;
+		}
+
+		fseek(f, 0, SEEK_END);
+		size_t fsize = ftell(f);
+		fseek(f, 0, SEEK_SET);
+
+		if (fsize > sizeof(buffer)) {
+			mbedtls_printf(" failed\n ! File size of %llu too large!", fsize);
+			goto exit;
+		}
+
+		fread(buffer, fsize, 1, f);
+
+		fclose(f);
+
+		ret = mbedtls_pk_parse_key(&key, buffer, fsize, NULL, 0,
+			mbedtls_ctr_drbg_random, &ctr_drbg);
+
+        if (ret != 0) {
+            mbedtls_printf(" failed\n  !  mbedtls_pk_parse_key returned -0x%04x",
+                           (unsigned int) -ret);
+            goto exit;
+        }
+#else
         ret = mbedtls_rsa_gen_key(mbedtls_pk_rsa(key), mbedtls_ctr_drbg_random, &ctr_drbg,
                                   opt.rsa_keysize, 65537);
         if (ret != 0) {
@@ -381,6 +523,7 @@ usage:
                            (unsigned int) -ret);
             goto exit;
         }
+#endif
     } else
 #endif /* MBEDTLS_RSA_C */
 #if defined(MBEDTLS_ECP_C)
