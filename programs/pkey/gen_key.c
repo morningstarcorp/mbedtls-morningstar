@@ -5,6 +5,16 @@
  *  SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
  */
 
+/*
+Custom edits by csmith
+
+The program was edited to instead generate a password protected private key. This
+only works right now for output formats of DER. I also decreased the default bit
+size for RSA to 2048 as that's likely what we'll use.
+
+See comments in write_private_key for details.
+*/
+
 #include "mbedtls/build_info.h"
 
 #include "mbedtls/platform.h"
@@ -147,20 +157,38 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
         len = ret;
         c = output_buf + sizeof(output_buf) - len;
 
-		// Convert to PKCS#8
+		/*
+		Convert to PKCS#8 format
+
+		Password protected keys are stored in Encrypted for PKCS#8, which expects
+		the encrypted data to itself be an unecrypted PKCS#8 formatted key.
+
+		PKCS#8 essentially adds extra metadata onto the existing private key format
+		(in this case PKCS#1 RSA key)
+
+		See RFC 5208 section 5 for more details
+
+		Note for all ASN.1 writes below that mbedtls works backwords when building
+		ASN.1 structures.
+		*/
+		// privateKey field
 		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_len(&c, output_buf, len));
 		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_tag(&c, output_buf,
 			(MBEDTLS_ASN1_OCTET_STRING | MBEDTLS_ASN1_PRIMITIVE)));
 
+		// privateKeyAlgorithm field
 		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_algorithm_identifier(&c, output_buf,
 			MBEDTLS_OID_PKCS1_RSA, MBEDTLS_OID_SIZE(MBEDTLS_OID_PKCS1_RSA), 0));
 
+		// version field
 		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_int(&c, output_buf, 0));
 
+		// Wrap PrivateKeyInfo in SEQUENCE tag
 		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_len(&c, output_buf, len));
 		MBEDTLS_ASN1_CHK_ADD(len, mbedtls_asn1_write_tag(&c, output_buf,
 			(MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED)));
 
+		// Write unecrypted key for debug purposes
 		if ((f = fopen("keyfile_2.key", "wb")) == NULL) {
 			return -1;
 		}
@@ -173,6 +201,16 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 		fclose(f);
 
 		{
+			/*
+			Generate password protected key
+
+			In order to do this we must first setup a valid PKCS#5 PBES2 structure
+			(see RFC 8018 section A.4). This provides mbedtls with the information
+			it needs to encrypt the unencrypted PKCS#8 key.
+
+			Then, we put the encrypted data into a valid PKCS#8 encrypted structure
+			(see RFC 5208 section 6).
+			*/
 			const char password[] = "morningstar";
 			const unsigned char salt[8] = { 0x35, 0x99, 0x62, 0x6B, 0x93, 0x1A, 0xDA, 0xE3 };
 			const unsigned char iv[16] = { 0x03, 0xAA, 0xD8, 0xA2, 0x51, 0xDC, 0xE3, 0x75, 0x34, 0x5A, 0xF7, 0x39, 0x26, 0x19, 0x0F, 0x17 };
@@ -183,9 +221,15 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 
 			total_len = sequence_len = 0;
 
+			// === encryptionScheme ===
+			// AES-256-CBC AlgorithmIdentifier includes a single parameter: the IV
+			// (See X.509 standard)
+
+			// AES-InitializationVector
 			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_octet_string(&p, pbuf,
 				iv, sizeof(iv)));
 
+			// ID
 			sequence_len = mbedtls_asn1_write_algorithm_identifier(&p,
 				pbuf, MBEDTLS_OID_AES_256_CBC,
 				MBEDTLS_OID_SIZE(MBEDTLS_OID_AES_256_CBC), sequence_len);
@@ -193,20 +237,29 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 			total_len += sequence_len;
 			sequence_len = 0;
 
+			// === keyDerivationFunc ===
+			// keyDerivationFunc is an AlgorithmIdentifier of type PBKDF2 (RFC 8018 A.2)
+
+			// prf (digest algorithm for generating the AES key)
 			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_algorithm_identifier(&p,
 				pbuf, MBEDTLS_OID_HMAC_SHA256,
 				MBEDTLS_OID_SIZE(MBEDTLS_OID_HMAC_SHA256), 0));
 
+			// keyLength is ignored
+
+			// iterationCount
 			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_int(&p, pbuf, 2048));
 
+			// salt-specified
 			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_octet_string(&p, pbuf,
 				salt, sizeof(salt)));
 
+			// Add wrapping SEQUENCE Tag
 			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_len(&p, pbuf, sequence_len));
-
 			MBEDTLS_ASN1_CHK_ADD(sequence_len, mbedtls_asn1_write_tag(&p, pbuf,
 				MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED));
 
+			// keyDerivationFunc AlgorithmIdentifier-ID
 			sequence_len = mbedtls_asn1_write_algorithm_identifier(&p,
 				pbuf, MBEDTLS_OID_PKCS5_PBKDF2,
 				MBEDTLS_OID_SIZE(MBEDTLS_OID_PKCS5_PBKDF2), sequence_len);
@@ -216,6 +269,7 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 			pbe_params.len = total_len;
 			pbe_params.tag = (MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED);
 
+			// Encrypt the key
 			ret = mbedtls_pkcs5_pbes2_ext(&pbe_params, MBEDTLS_PKCS5_ENCRYPT,
 				(unsigned char*)password, strlen(password), c, len, encrypted_buffer,
 				sizeof(encrypted_buffer), &encrypted_len);
@@ -224,11 +278,17 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 				return ret;
 			}
 
+			/*
+			Wrap the encrypted key in a valid PKCS#8 Encrypted Key format
+			*/
+
 			p = output_buf + sizeof(output_buf);
 
+			// encryptedData
 			mbedtls_asn1_write_octet_string(&p, output_buf, encrypted_buffer,
 				encrypted_len);
 
+			// encryptedAlgorithm params
 			p -= pbe_params.len;
 			memcpy(p, pbe_params.p, pbe_params.len);
 
@@ -236,12 +296,14 @@ static int write_private_key(mbedtls_pk_context *key, const char *output_file)
 			MBEDTLS_ASN1_CHK_ADD(total_len, mbedtls_asn1_write_len(&p, output_buf, pbe_params.len));
 			MBEDTLS_ASN1_CHK_ADD(total_len, mbedtls_asn1_write_tag(&p, output_buf, (MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED)));
 
+			// encryptedAlgorithm ID
 			mbedtls_asn1_write_algorithm_identifier(&p, output_buf,
 				MBEDTLS_OID_PKCS5_PBES2, MBEDTLS_OID_SIZE(MBEDTLS_OID_PKCS5_PBES2),
 				total_len);
 
 			total_len = (output_buf + sizeof(output_buf)) - p;
 
+			// Sequence header for PKCS#8
 			MBEDTLS_ASN1_CHK_ADD(total_len, mbedtls_asn1_write_len(&p, output_buf, total_len));
 			MBEDTLS_ASN1_CHK_ADD(total_len, mbedtls_asn1_write_tag(&p, output_buf, (MBEDTLS_ASN1_SEQUENCE | MBEDTLS_ASN1_CONSTRUCTED)));
 
